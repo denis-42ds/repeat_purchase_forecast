@@ -3,8 +3,9 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 class DatasetExplorer:
-	def __init__(self, dataset):
+	def __init__(self, dataset, y_lim):
 		self.dataset = dataset
+		self.y_lim = y_lim
 
 	def explore_dataset(self):
 		# Вывод информации о датасете
@@ -24,8 +25,8 @@ class DatasetExplorer:
 		plt.show()
 
 		# Удаление полных дубликатов строк
-		self.dataset.drop_duplicates(inplace=True)
-		self.dataset.reset_index(drop=True, inplace=True)
+		#  self.dataset.drop_duplicates(inplace=True)
+		#  self.dataset.reset_index(drop=True, inplace=True)
 
 		# Количество уникальных значений client_id
 		print(f"""количество уникальных значений client_id:
@@ -43,7 +44,7 @@ class DatasetExplorer:
 		# Количество уникальных значений message_id
 		print(f"""количество уникальных значений message_id:
 		{self.dataset['message_id'].nunique()}""")
-		print(f"""количество уникальных значений client_id в общем количестве client_id:
+		print(f"""количество уникальных значений message_id в общем количестве message_id:
 		{self.dataset['message_id'].nunique() / self.dataset.shape[0] * 100:.3f}%""")
 
 		# Круговая диаграмма для соотношения уникальных и повторяющихся значений message_id
@@ -69,14 +70,14 @@ class DatasetExplorer:
 		print(f"""количество уникальных значений price: {self.dataset['price'].nunique()}""")
 
 		# График распределения цены товаров
-		sns.kdeplot(data=self.dataset, x='price', clip=(-1, 200000), fill=True)
+		sns.kdeplot(data=self.dataset, x='price', clip=(-1, self.y_lim), fill=True)
 		plt.title('Распределение цены товаров', size=12)
 		plt.show()
 
 		# Диаграмма размаха для цены товаров
 		plt.figure(figsize=(8, 6))
 		sns.boxplot(data=self.dataset['price'])
-		plt.ylim(-1, 200000)
+		plt.ylim(-1, self.y_lim)
 		plt.title('Диаграмма размаха для цены товаров', size=12)
 		plt.ylabel('Количество, шт')
 		plt.show()
@@ -86,8 +87,8 @@ class DatasetExplorer:
 		Последняя запись в датафрейме: {self.dataset['date'].max()}""")
 
 		# Вывод информации о датасете после исследований
-		print("Информация о датасете после первичных преобразований:")
-		self.dataset.info()
+		#  print("Информация о датасете после первичных преобразований:")
+		#  self.dataset.info()
 
 	def add_new_features(self, new_features):
 		# Добавление новых признаков в датасет
