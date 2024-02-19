@@ -1,5 +1,6 @@
 import pandas as pd
 import seaborn as sns
+from datetime import timedelta
 import matplotlib.pyplot as plt
 
 class DatasetExplorer:
@@ -90,10 +91,68 @@ class DatasetExplorer:
 		#  print("Информация о датасете после первичных преобразований:")
 		#  self.dataset.info()
 
-	def add_new_features(self, new_features):
-		# Добавление новых признаков в датасет
-		pass
-		self.dataset = pd.concat([self.dataset, new_features], axis=1)
+	def add_new_features(self, holidays):
+		'группировка по client_id и date с аггрегаций остальных признаков'
+		grouped_dataset = (self.dataset
+                           .groupby(['client_id', 'date'])
+                           .agg({'quantity': 'sum', 
+                                 'price': 'sum', 
+                                 'message_id': 'sum'})
+                           .reset_index()
+                          )
+		'''
+  создание целевого признака:
+  - если в течение 30-ти дней совершена покупка - 1, нет - 0
+  '''
+		grouped_dataset['target'] = 0
+		prev_client_id = None
+		prev_purchase_date = None
+
+		for index, row in grouped_dataset.iterrows():
+			if prev_client_id == row['client_id'] and (row['date'] - prev_purchase_date).days <= 30:
+				grouped_dataset.at[index-1, 'target'] = 1
+			else:
+				grouped_dataset.at[index, 'target'] = 0
+
+			prev_client_id = row['client_id']
+			prev_purchase_date = row['date']
+
+		'''
+  создание признака с накопительной суммой активностей в течение 30-ти дней
+  '''
+		grouped_dataset['cumulative_sum'] = 0
+		prev_client_id = None
+		prev_purchase_date = None
+		cumulative_sum = 0
+
+		for index, row in grouped_dataset.iterrows():
+			if prev_client_id == row['client_id'] and (row['date'] - prev_purchase_date).days <= 30:
+				cumulative_sum += 1
+			else:
+				cumulative_sum = 1
+
+			grouped_dataset.at[index, 'cumulative_sum'] = cumulative_sum
+
+			prev_client_id = row['client_id']
+			prev_purchase_date = row['date']
+		'''
+  добавление данных о выходных и праздничных днях
+  '''
+		grouped_dataset['is_holiday'] = grouped_dataset['date'].isin(holidays['date']).astype(int)
+		'''
+  исключение из датасета последних 30-ти дней, т.к. в этот период нельзя посчитать таргет
+  '''
+		grouped_dataset = (
+			grouped_dataset[(grouped_dataset['date'] < (grouped_dataset['date'].max() - timedelta(days=30))) & 
+			(grouped_dataset['target'] == 0)]
+		)
+		'''
+  установка даты в индекс
+  '''
+		grouped_dataset.set_index('date', inplace=True)
+		grouped_dataset.sort_index(inplace=True)
+
+		return grouped_dataset
 
 	def prepare_for_training(self):
 		# Метод для подготовки датасета к обучению
