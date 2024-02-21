@@ -1,7 +1,24 @@
+import phik
 import pandas as pd
 import seaborn as sns
-from datetime import timedelta
 import matplotlib.pyplot as plt
+
+from prophet import Prophet
+from datetime import timedelta
+from statsmodels.tsa.stattools import adfuller
+from phik.report import plot_correlation_matrix
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from statsmodels.tsa.seasonal import seasonal_decompose
+
+
+
+
+# установка констант
+RANDOM_STATE = 42
 
 class DatasetExplorer:
 	def __init__(self, dataset, y_lim):
@@ -91,15 +108,13 @@ class DatasetExplorer:
 		#  print("Информация о датасете после первичных преобразований:")
 		#  self.dataset.info()
 
-	def add_new_features(self, holidays):
+	def add_new_features(self, dataset, holidays):
 		'группировка по client_id и date с аггрегаций остальных признаков'
-		grouped_dataset = (self.dataset
-                           .groupby(['client_id', 'date'])
-                           .agg({'quantity': 'sum', 
-                                 'price': 'sum', 
-                                 'message_id': 'sum'})
-                           .reset_index()
-                          )
+		grouped_dataset = (dataset
+						   .groupby(['client_id', 'date'])
+						   .agg({'quantity': 'sum', 'price': 'sum', 'message_id': 'sum'})
+						   .reset_index()
+						  )
 		'''
   создание целевого признака:
   - если в течение 30-ти дней совершена покупка - 1, нет - 0
@@ -142,22 +157,120 @@ class DatasetExplorer:
 		'''
   исключение из датасета последних 30-ти дней, т.к. в этот период нельзя посчитать таргет
   '''
-		grouped_dataset = (
-			grouped_dataset[(grouped_dataset['date'] < (grouped_dataset['date'].max() - timedelta(days=30))) & 
-			(grouped_dataset['target'] == 0)]
-		)
+		grouped_dataset = grouped_dataset[
+		(
+			(grouped_dataset['date'] >= (grouped_dataset['date'].max() - timedelta(days=30))) & 
+			(grouped_dataset['target'] == 1)
+		) | 
+		(grouped_dataset['date'] < grouped_dataset['date'].max() - timedelta(days=30))
+		]
+
 		'''
   установка даты в индекс
   '''
 		grouped_dataset.set_index('date', inplace=True)
 		grouped_dataset.sort_index(inplace=True)
 
+		# Соотношение классов целевого признака
+		sizes = [grouped_dataset['target'].value_counts()[1], grouped_dataset['target'].value_counts()[0]]
+		fig1, ax1 = plt.subplots()
+		ax1.pie(sizes, labels=['True', 'False'], autopct='%1.0f%%')
+		plt.title('Соотношение классов целевого признака', size=12)
+		plt.show
+
+		# Проверка корреляций между признаками
+		phik_overview = grouped_dataset.drop(columns=['client_id', 'message_id']).phik_matrix()
+		sns.set()
+		plot_correlation_matrix(phik_overview.values,
+                        x_labels=phik_overview.columns,
+                        y_labels=phik_overview.index,
+                        vmin=0, vmax=1,
+                        fontsize_factor=0.8, figsize=(8, 8))
+		plt.xticks(rotation=45)
+		plt.title('Корреляция между признаками', fontsize=12, y=1.02)
+		plt.tight_layout()
+
 		return grouped_dataset
 
-	def prepare_for_training(self):
-		# Метод для подготовки датасета к обучению
-		# Здесь можно выполнить предобработку данных, например, заполнение пропущенных значений, кодирование категориальных признаков и т.д.
-		pass
+	def seasonality_and_stationarity(self, dataset, period_1, period_2):
+		'''разложение на тренд, сезонность и остатки за весь период'''
+		
+		decomposed_units_year = seasonal_decompose(dataset['target'], period=period_1)
+
+		plt.figure(figsize=(10,6))
+		plt.suptitle('Decomposition Analysis of Annual Data', fontsize=12)
+		plt.subplot(311)
+		decomposed_units_year.trend.plot(ax=plt.gca())
+		plt.title('Trend')
+		plt.subplot(312)
+		decomposed_units_year.seasonal.plot(ax=plt.gca())
+		plt.title('Seasonality')
+		plt.subplot(313)
+		decomposed_units_year.resid.plot(ax=plt.gca())
+		plt.title('Residuals')
+		plt.tight_layout()
+
+		'''разложение на тренд, сезонность и остатки за две недели'''
+
+		decomposed_units_month = seasonal_decompose(dataset['target']['2023-06-24':'2023-07-24'], period=period_2)
+
+		plt.figure(figsize=(10,6))
+		plt.suptitle('Decomposition Analysis of Monthly Data (June 24, 2023 - July 24, 2023)', fontsize=12)
+		plt.subplot(311)
+		decomposed_units_month.trend.plot(ax=plt.gca())
+		plt.title('Trend')
+		plt.subplot(312)
+		decomposed_units_month.seasonal.plot(ax=plt.gca())
+		plt.title('Seasonality')
+		plt.subplot(313)
+		decomposed_units_month.resid.plot(ax=plt.gca())
+		plt.title('Residuals')
+		plt.tight_layout()
+
+		'''проверка стационарности временного ряда'''
+		print('Проведение теста Дики-Фуллера для проверки ряда на стационарность')
+		H0 = 'ряд стационарен, единичных корней нет'
+		H1 = 'ряд не стационарен, имеются единичные корни'
+
+		test = adfuller(dataset['target'])
+		print('adf: ', test[0])
+		print('p-value: ', test[1])
+		print('Critical values: ', test[4])
+		if test[0] > test[4]['5%']:
+			print(H1)
+		else:
+			print(H0)
+
+	def prepare_for_training(self, dataset):
+		'''
+  - на вход получает датасет
+  - производит отделение целевого признака,
+    масштабирование данных,
+    разделение на две выборки
+  - на выходе: две выборки, объект TimeSeriesSplit
+    печать размерностей этих выборок
+  '''
+		
+		y = dataset['target']
+		X = dataset.drop(['target'], axis=1)
+
+		# Приведение данных к единому масштабу
+		scaler = StandardScaler()
+		X_es = (pd.DataFrame(scaler.fit_transform(X.drop(['message_id', 'client_id'], axis=1)),
+							 columns=X.drop(['message_id', 'client_id'], axis=1).columns,
+							 index=X.drop(['message_id', 'client_id'], axis=1).index))
+		X_es = pd.concat([X_es, X[['message_id', 'client_id']]], axis=1)
+		# Разделение данных на выборки
+		X_train, X_test, y_train, y_test = (train_test_split(X_es,
+															 y,
+															 test_size=0.1,
+															 random_state=RANDOM_STATE,
+															 shuffle=False))
+
+		tscv = TimeSeriesSplit(n_splits=round((X_train.shape[0] / X_test.shape[0]) - 1))
+		print(X_train.shape, X_test.shape, y_train.shape, y_test.shape)
+
+		return X_train, X_test, y_train, y_test, tscv
     
 	def train(self):
 		# Метод для обучения модели на подготовленных данных
