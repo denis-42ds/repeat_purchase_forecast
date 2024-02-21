@@ -1,6 +1,12 @@
+# folders
+
+catboost_info/
 data/
 mp_venv/
 __pycache__/
 .git/
 .ipynb_checkpoints/
+
+# environment variables
+
 .env

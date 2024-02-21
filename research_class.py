@@ -1,19 +1,21 @@
+# импорт модулей
 import phik
+import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
 from prophet import Prophet
 from datetime import timedelta
+from catboost import CatBoostClassifier
 from statsmodels.tsa.stattools import adfuller
 from phik.report import plot_correlation_matrix
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import GridSearchCV
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
+from sklearn.calibration import CalibratedClassifierCV
 from statsmodels.tsa.seasonal import seasonal_decompose
-
+from sklearn.preprocessing import StandardScaler, OrdinalEncoder
+from sklearn.model_selection import train_test_split, GridSearchCV, TimeSeriesSplit
+from sklearn.metrics import make_scorer, roc_curve, recall_score, roc_auc_score, precision_score, confusion_matrix
 
 
 
@@ -104,15 +106,15 @@ class DatasetExplorer:
 		print(f"""Первая запись в датафрейме: {self.dataset['date'].min()}
 		Последняя запись в датафрейме: {self.dataset['date'].max()}""")
 
-		# Вывод информации о датасете после исследований
-		#  print("Информация о датасете после первичных преобразований:")
-		#  self.dataset.info()
-
 	def add_new_features(self, dataset, holidays):
+		'кодирование message_id при помощи OrdinalEncoder'
+		encoder = OrdinalEncoder()
+		dataset['message_id_encoded'] = encoder.fit_transform(dataset[['message_id']])
+		dataset.drop(columns=['message_id'], inplace=True)
 		'группировка по client_id и date с аггрегаций остальных признаков'
 		grouped_dataset = (dataset
 						   .groupby(['client_id', 'date'])
-						   .agg({'quantity': 'sum', 'price': 'sum', 'message_id': 'sum'})
+						   .agg({'quantity': 'sum', 'price': 'sum', 'message_id_encoded': 'sum'})
 						   .reset_index()
 						  )
 		'''
@@ -179,7 +181,7 @@ class DatasetExplorer:
 		plt.show
 
 		# Проверка корреляций между признаками
-		phik_overview = grouped_dataset.drop(columns=['client_id', 'message_id']).phik_matrix()
+		phik_overview = grouped_dataset.drop(columns=['client_id']).phik_matrix()
 		sns.set()
 		plot_correlation_matrix(phik_overview.values,
                         x_labels=phik_overview.columns,
@@ -256,10 +258,10 @@ class DatasetExplorer:
 
 		# Приведение данных к единому масштабу
 		scaler = StandardScaler()
-		X_es = (pd.DataFrame(scaler.fit_transform(X.drop(['message_id', 'client_id'], axis=1)),
-							 columns=X.drop(['message_id', 'client_id'], axis=1).columns,
-							 index=X.drop(['message_id', 'client_id'], axis=1).index))
-		X_es = pd.concat([X_es, X[['message_id', 'client_id']]], axis=1)
+		X_es = (pd.DataFrame(scaler.fit_transform(X.drop(['client_id'], axis=1)),
+							 columns=X.drop(['client_id'], axis=1).columns,
+							 index=X.drop(['client_id'], axis=1).index))
+		X_es = pd.concat([X_es, X[['client_id']]], axis=1)
 		# Разделение данных на выборки
 		X_train, X_test, y_train, y_test = (train_test_split(X_es,
 															 y,
@@ -272,12 +274,110 @@ class DatasetExplorer:
 
 		return X_train, X_test, y_train, y_test, tscv
     
-	def train(self):
-		# Метод для обучения модели на подготовленных данных
-		# Здесь можно использовать любой алгоритм машинного обучения для обучения модели
-		pass
+	def modeling_pipeline(self, model_name, X_train, y_train, tscv, periods):
+		'''
+  - на вход получает название модели, обучающие данные и объект TimeSerisSplit;
+  - на выходе выводит на печать recall и precision, параметры модели и лучшую метрику;
+  - визуализирует результаты обучения на диаграмме.
+  '''
+		if model_name == 'Baseline':
+			model = LogisticRegression()
+			scorers = {
+				'recall': make_scorer(recall_score),
+				'precision': make_scorer(precision_score)
+			}
+			param_grid = {'fit_intercept': [True, False]}
+			grid_search = GridSearchCV(model, param_grid, cv=tscv, scoring=scorers, refit='recall')
+			grid_search.fit(X_train.drop(['client_id'], axis=1).values, y_train)
+			y_pred = grid_search.predict(X_train.drop(['client_id'], axis=1).values)
+			y_pred_proba = grid_search.predict_proba(X_train.drop(['client_id'], axis=1).values)[:, 1]
+			print("Лучшие параметры GridSearch:", grid_search.best_params_)
+			print("Лучшая оценка GridSearch:", abs(grid_search.best_score_))
+		
+		elif model_name == 'Prophet':
+			model = Prophet()
+			df = pd.DataFrame({'ds': X_train.index, 'y': y_train.values})
+			model.fit(df)
+			future = model.make_future_dataframe(periods=periods)
+			forecast = model.predict(future)
+			threshold = 0.5
+			y_pred = np.where(forecast['yhat'].iloc[-len(y_train):].values > threshold, 1, 0)
+			# применение калибровки вероятностей к прогнозам, чтобы получить вероятности принадлежности к классу 1
+			calibrated_model = CalibratedClassifierCV()
+			calibrated_model.fit(y_pred.reshape(-1, 1), y_train)
+			y_pred_proba = calibrated_model.predict_proba(y_pred.reshape(-1, 1))[:, 1]
+		
+		elif model_name == 'CatBoost':
+			model = CatBoostClassifier(random_state=RANDOM_STATE, eval_metric='AUC')
+			model.fit(X_train.drop(['client_id'], axis=1).values, y_train, verbose=100)
+			y_pred_proba = model.predict_proba(X_train.drop(['client_id'], axis=1).values)[:, 1]
+			y_pred = model.predict(X_train.drop(['client_id'], axis=1).values)
+
+		# Вычисление ROC-AUC, precision, recall
+		roc_auc_value = roc_auc_score(y_train, y_pred_proba)
+		recall = recall_score(y_train, y_pred, pos_label=1, zero_division='warn')
+		precision = precision_score(y_train, y_pred, pos_label=1, zero_division='warn')
+
+		print("ROC-AUC:", roc_auc_value)
+		print("Precision:", precision)
+		print("Recall:", recall)
+
+		# Визуализация кривой ROC
+		fpr, tpr, thresholds = roc_curve(y_train, y_pred_proba)
+		sns.set_style('darkgrid')
+		plt.plot(fpr, tpr, linewidth=1.5, label='ROC-AUC (area = %0.2f)' % roc_auc_value)
+		plt.plot([0, 1], [0, 1], linestyle='--', linewidth=1.5, label='random_classifier')
+		plt.xlim([-0.05, 1.0])
+		plt.ylim([0.0, 1.05])
+		plt.xlabel('False Positive Rate', fontsize=11)
+		plt.ylabel('True Positive Rate', fontsize=11)
+		plt.title('%s Receiver Operating Characteristic' % model_name, fontsize=12)
+		plt.legend(loc='lower right')
+		plt.show()
+
+		return recall, precision, roc_auc_value, model
     
-	def feature_importance(self):
-		# Метод для определения важности признаков
-		# Здесь можно использовать различные методы, например, анализ важности признаков с помощью модели или перестановочный важность
-		pass
+	def test_best_model(self, model, X_train, X_test, y_test):
+		'''
+  принимает на вход модель, обучающую и тестовую выборки, тестовый таргет
+  возвращает:
+  - матрицу ошибок
+  - метрики для тестовой выборки
+  - диаграмму важности признаков
+  '''
+		try:
+			if len(X_test) < 1 or len(np.unique(y_test)) != 2:
+				raise ValueError("Невозможно посчитать метрики - в данных присутствует только один класс")
+				
+			y_proba = model.predict_proba(X_test)[:, 1]
+			roc_auc = roc_auc_score(y_test, y_proba)
+			y_pred = model.predict(X_test)
+			recall = recall_score(y_test, y_pred, pos_label=1)
+			precision = precision_score(y_test, y_pred, pos_label=1)
+        
+			print(f"ROC-AUC на тестовой выборке: {round(roc_auc, 2)}")
+			print(f"Precision на тестовой выборке: {round(precision, 2)}")
+			print(f"Recall на тестовой выборке: {round(recall, 2)}")
+
+			sns.set_style('darkgrid')
+			plt.figure(figsize=(6, 6))
+			sns.heatmap(confusion_matrix(y_test, y_pred.round()), annot=True, fmt='3.0f', cmap='crest')
+			plt.title('Матрица ошибок', fontsize=12, y=1.02)
+			plt.show()
+
+			features_importance = (
+				pd.DataFrame(data = {'feature': X_train.drop('client_id', axis=1).columns, 
+									 'percent': np.round(model.feature_importances_, decimals=1)})
+			)
+			plt.figure(figsize=(8, 6))
+			plt.bar(features_importance.sort_values('percent', ascending=False)['feature'], 
+					features_importance.sort_values('percent', ascending=False)['percent'])
+
+			plt.xticks(features_importance['feature'])
+			plt.xticks(rotation=45)
+			plt.ylabel('Процент от общего значения')
+			plt.title("Важность признаков", fontsize=12, y=1.02)
+			plt.show()
+            
+		except ValueError as e:
+			print(e)
