@@ -10,10 +10,10 @@ from datetime import timedelta
 from catboost import CatBoostClassifier
 from statsmodels.tsa.stattools import adfuller
 from phik.report import plot_correlation_matrix
+from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.calibration import CalibratedClassifierCV
 from statsmodels.tsa.seasonal import seasonal_decompose
-from sklearn.preprocessing import StandardScaler, OrdinalEncoder
 from sklearn.model_selection import train_test_split, GridSearchCV, TimeSeriesSplit
 from sklearn.metrics import make_scorer, roc_curve, recall_score, roc_auc_score, precision_score, confusion_matrix
 
@@ -107,15 +107,15 @@ class DatasetExplorer:
 		Последняя запись в датафрейме: {self.dataset['date'].max()}""")
 
 	def add_new_features(self, dataset, holidays):
-		'кодирование message_id при помощи OrdinalEncoder'
-		encoder = OrdinalEncoder()
-		dataset['message_id_encoded'] = encoder.fit_transform(dataset[['message_id']])
-		dataset.drop(columns=['message_id'], inplace=True)
 		'группировка по client_id и date с аггрегаций остальных признаков'
 		grouped_dataset = (dataset
 						   .groupby(['client_id', 'date'])
-						   .agg({'quantity': 'sum', 'price': 'sum', 'message_id_encoded': 'sum'})
+						   .agg({'quantity': 'sum', 'price': 'sum', 'message_id': 'nunique'})
 						   .reset_index()
+						  )
+		grouped_dataset = (grouped_dataset
+						   .rename(columns={'message_id': 'count_unique_message_id',
+											'price': 'sum_price'})
 						  )
 		'''
   создание целевого признака:
@@ -256,23 +256,29 @@ class DatasetExplorer:
 		y = dataset['target']
 		X = dataset.drop(['target'], axis=1)
 
-		# Приведение данных к единому масштабу
-		scaler = StandardScaler()
-		X_es = (pd.DataFrame(scaler.fit_transform(X.drop(['client_id'], axis=1)),
-							 columns=X.drop(['client_id'], axis=1).columns,
-							 index=X.drop(['client_id'], axis=1).index))
-		X_es = pd.concat([X_es, X[['client_id']]], axis=1)
 		# Разделение данных на выборки
-		X_train, X_test, y_train, y_test = (train_test_split(X_es,
+		X_train, X_test, y_train, y_test = (train_test_split(X,
 															 y,
 															 test_size=0.1,
 															 random_state=RANDOM_STATE,
-															 shuffle=False))
+															 shuffle=False)
+										   )
+
+		# Приведение данных к единому масштабу
+		scaler = StandardScaler()
+		X_train_scl = (pd.DataFrame(scaler.fit_transform(X_train.drop(['client_id'], axis=1)),
+									columns=X_train.drop(['client_id'], axis=1).columns,
+									index=X_train.drop(['client_id'], axis=1).index))
+		X_train_scl = pd.concat([X_train_scl, X_train[['client_id']]], axis=1)
+		X_test_scl = (pd.DataFrame(scaler.transform(X_test.drop(['client_id'], axis=1)),
+								   columns=X_test.drop(['client_id'], axis=1).columns,
+								   index=X_test.drop(['client_id'], axis=1).index))
+		X_test_scl = pd.concat([X_test_scl, X_test[['client_id']]], axis=1)
 
 		tscv = TimeSeriesSplit(n_splits=round((X_train.shape[0] / X_test.shape[0]) - 1))
-		print(X_train.shape, X_test.shape, y_train.shape, y_test.shape)
+		print(X_train_scl.shape, X_test_scl.shape, y_train.shape, y_test.shape)
 
-		return X_train, X_test, y_train, y_test, tscv
+		return X_train_scl, X_test_scl, y_train, y_test, tscv
     
 	def modeling_pipeline(self, model_name, X_train, y_train, tscv, periods):
 		'''
